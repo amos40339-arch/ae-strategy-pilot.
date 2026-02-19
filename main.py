@@ -3,45 +3,60 @@ import requests
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Credentials from Environment Variables
+# Credentials from Environment Variables (Render)
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-# 1. Start Command
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# 1. The Welcome Message (Centralized)
+async def send_welcome(update: Update):
     welcome = (
         "🚀 **AE Strategy Pilot Active**\n\n"
         "I am your strategic partner. I don't do 'nice'—I do 'results.'\n\n"
         "• Send a **Voice Note**: I'll transcribe and give you a ruthless strategy.\n"
-        "• Send a **Text Message**: We'll brainstorm your next move."
+        "• Send a **Text Message**: We'll brainstorm your next move.\n\n"
+        "How can we win today?"
     )
     await update.message.reply_text(welcome, parse_mode="Markdown")
 
-# 2. Text Interaction (Brainstorming)
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
-    chat_resp = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-        json={
-            "model": "llama-3.3-70b-versatile",
-            "messages": [
-                {"role": "system", "content": "You are the AE Strategic Partner. Be blunt, professional, and practical. Analyze the user's input and provide a ruthless path to execution."},
-                {"role": "user", "content": user_text}
-            ]
-        }
-    )
-    strategy = chat_resp.json()['choices'][0]['message']['content']
-    await update.message.reply_text(strategy)
+# 2. Handler for /start command
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_welcome(update)
 
-# 3. Audio Interaction (Transcription + Strategy)
+# 3. Handler for Text (Greetings or Strategy)
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text.lower().strip()
+    
+    # List of greeting words to trigger the welcome message
+    greetings = ["hello", "hi", "hey", "yo", "morning", "afternoon", "evening", "start"]
+    
+    if user_text in greetings:
+        await send_welcome(update)
+    else:
+        # If it's not a greeting, send it to the AI brain
+        chat_resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": [
+                    {"role": "system", "content": "You are the AE Strategic Partner. Be blunt, professional, and practical. Analyze the user's input and provide a ruthless path to execution."},
+                    {"role": "user", "content": user_text}
+                ]
+            }
+        )
+        strategy = chat_resp.json()['choices'][0]['message']['content']
+        await update.message.reply_text(strategy)
+
+# 4. Handler for Audio (Transcription + Strategy)
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = await update.message.reply_text("📥 AE Pilot is listening...")
+    
+    # Download Audio
     audio_file = update.message.voice or update.message.audio
     file = await context.bot.get_file(audio_file.file_id)
     file_bytes = await file.download_as_bytearray()
 
-    # Transcribe
+    # Transcribe with Groq Whisper
     files = {'file': ('audio.ogg', file_bytes)}
     trans_resp = requests.post(
         "https://api.groq.com/openai/v1/audio/transcriptions",
@@ -49,9 +64,9 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         files=files,
         data={"model": "whisper-large-v3"}
     )
-    transcript = trans_resp.json().get("text", "Error transcribing.")
+    transcript = trans_resp.json().get("text", "Error transcribing audio.")
 
-    # Strategy
+    # Strategy with Groq Llama-3
     await status.edit_text("🧠 Analyzing strategy...")
     chat_resp = requests.post(
         "https://api.groq.com/openai/v1/chat/completions",
@@ -59,7 +74,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         json={
             "model": "llama-3.3-70b-versatile",
             "messages": [
-                {"role": "system", "content": "You are the AE Strategic Partner. Provide a SUMMARY, RUTHLESS ANALYSIS, and 3 NEXT STEPS."},
+                {"role": "system", "content": "You are the AE Strategic Partner. Provide a SUMMARY, RUTHLESS ANALYSIS, and 3 NEXT STEPS based on the transcript."},
                 {"role": "user", "content": f"Analyze this transcript: {transcript}"}
             ]
         }
@@ -69,7 +84,13 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
+    
+    # Listen for /start
     app.add_handler(CommandHandler("start", start))
+    # Listen for all other text
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    # Listen for audio/voice
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_audio))
+    
+    print("AE Strategy Pilot is deployed and running...")
     app.run_polling()
