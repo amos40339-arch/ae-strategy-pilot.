@@ -6,7 +6,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from groq import Groq
 
-# --- 1. SETUP ---
+# --- 1. SETUP & LOGGING ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -17,18 +17,19 @@ MAX_HISTORY = 10
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
+# --- 2. FLASK HEARTBEAT (For Render) ---
 @app.route('/')
 def health_check():
-    return "AE Strategy Pilot: Online", 200
+    return "AE Strategy Pilot: Online & Client-Ready", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# --- 2. THE BRAIN ---
+# --- 3. THE BRAIN (AI Logic) ---
 async def get_ai_response(user_id, text):
     if user_id not in user_conversations:
-        user_conversations[user_id] = [{"role": "system", "content": "You are a ruthless business mentor. Be blunt and practical."}]
+        user_conversations[user_id] = [{"role": "system", "content": "You are a ruthless business mentor. Be blunt and practical. No fluff."}]
     
     user_conversations[user_id].append({"role": "user", "content": text})
     
@@ -40,27 +41,32 @@ async def get_ai_response(user_id, text):
     response = chat_completion.choices[0].message.content
     user_conversations[user_id].append({"role": "assistant", "content": response})
     
+    # Trim history to keep it fast/cheap
     if len(user_conversations[user_id]) > MAX_HISTORY:
         user_conversations[user_id] = [user_conversations[user_id][0]] + user_conversations[user_id][-(MAX_HISTORY-1):]
     
     return response
 
-# --- 3. HANDLERS ---
+# --- 4. HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Pilot Active. Send text or voice.")
+    await update.message.reply_text("Pilot Active. I am ready to audit your strategy via text or voice.")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # For text, we can just reply directly
     response = await get_ai_response(update.effective_user.id, update.message.text)
     await update.message.reply_text(response)
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status_msg = await update.message.reply_text("🎤 Thinking...")
+    # STEP 1: Immediate acknowledgement
+    status_msg = await update.message.reply_text("🎤 Hearing you...")
     
     file_path = "user_voice.ogg"
     try:
+        # STEP 2: Download the audio file
         voice_file = await context.bot.get_file(update.message.voice.file_id)
         await voice_file.download_to_drive(file_path)
         
+        # STEP 3: Transcribe using Whisper
         with open(file_path, "rb") as file:
             transcription = client.audio.transcriptions.create(
                 file=(file_path, file.read()),
@@ -68,29 +74,42 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         
         user_text = transcription.text
+        
+        # STEP 4: SHOW CLIENT THE TRANSCRIPT IMMEDIATELY
+        await status_msg.edit_text(f"📝 *You said:* \"{user_text}\"\n\n_Strategizing..._")
+        
+        # STEP 5: Get AI Analysis
         response = await get_ai_response(update.effective_user.id, user_text)
-        await status_msg.edit_text(f"📝 *You said:* {user_text}\n\n🔥 *Strategy:* {response}", parse_mode="Markdown")
+        
+        # STEP 6: Send the Final Strategy
+        await update.message.reply_text(f"🚀 *Strategy:* \n\n{response}", parse_mode="Markdown")
         
     except Exception as e:
         logger.error(f"Voice Error: {e}")
-        await status_msg.edit_text("Couldn't process audio. Try text.")
+        await status_msg.edit_text("❌ Error processing audio. Try text or a shorter clip.")
     finally:
+        # STEP 7: Clean up server space
         if os.path.exists(file_path):
             os.remove(file_path)
 
-# --- 4. EXECUTION ---
+# --- 5. EXECUTION ---
 def main():
+    # Start Flask heartbeat
     threading.Thread(target=run_flask, daemon=True).start()
     
     TOKEN = os.environ.get("TELEGRAM_TOKEN")
+    if not TOKEN:
+        logger.error("TELEGRAM_TOKEN is missing!")
+        return
+
     application = Application.builder().token(TOKEN).build()
 
+    # Register Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    # FIXED LINE: Wrapped filters.VOICE inside MessageHandler
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
-    logger.info("🚀 Pilot Live.")
+    logger.info("🚀 Pilot is Live: Transcription -> Analysis sequence active.")
     application.run_polling()
 
 if __name__ == "__main__":
