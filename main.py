@@ -6,98 +6,102 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from groq import Groq
 
-# --- 1. LOGGING SETUP ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
-    level=logging.INFO
-)
+# --- 1. LOGGING & SETUP ---
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- 2. FLASK SERVER (The Heartbeat for Render) ---
 app = Flask(__name__)
-
-@app.route('/')
-def health_check():
-    return "AE Strategy Pilot: Online, Smart, and Ruthless", 200
-
-def run_flask():
-    # Render's dynamic port or default 10000
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
-
-# --- 3. MEMORY & AI SETUP ---
-# Dictionary to store history: {user_id: [messages]}
 user_conversations = {}
-# Keep the last 10 messages so the AI doesn't get confused or expensive
 MAX_HISTORY = 10
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
+# --- 2. FLASK HEARTBEAT ---
+@app.route('/')
+def health_check():
+    return "AE Strategy Pilot: Voice & Text Active", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+# --- 3. THE BRAIN (AI Logic) ---
+async def get_ai_response(user_id, text):
+    if user_id not in user_conversations:
+        user_conversations[user_id] = [{"role": "system", "content": "You are a ruthless business mentor. Be blunt and practical."}]
+    
+    user_conversations[user_id].append({"role": "user", "content": text})
+    
+    chat_completion = client.chat.completions.create(
+        messages=user_conversations[user_id],
+        model="llama-3.3-70b-versatile",
+    )
+    
+    response = chat_completion.choices[0].message.content
+    user_conversations[user_id].append({"role": "assistant", "content": response})
+    
+    # Trim history
+    if len(user_conversations[user_id]) > MAX_HISTORY:
+        user_conversations[user_id] = [user_conversations[user_id][0]] + user_conversations[user_id][-(MAX_HISTORY-1):]
+    
+    return response
+
+# --- 4. HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    # Reset memory when someone types /start
-    user_conversations[user_id] = [
-        {"role": "system", "content": "You are a ruthless business mentor. Be blunt, honest, and practical. No fluff."}
-    ]
-    await update.message.reply_text(
-        "Memory active. I now remember what we talk about.\n\n"
-        "Send me your business problem. If you pivot or change the topic, I'll keep up."
-    )
+    user_conversations[user_id] = [{"role": "system", "content": "You are a ruthless business mentor. Be blunt and practical."}]
+    await update.message.reply_text("I can now hear you and read your text. Speak your problem or type it. I'm listening.")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_text = update.message.text
-    
-    # Initialize history if it's a new user who didn't type /start
-    if user_id not in user_conversations:
-        user_conversations[user_id] = [
-            {"role": "system", "content": "You are a ruthless business mentor. Be blunt and practical."}
-        ]
-    
-    # 1. Add User message to memory
-    user_conversations[user_id].append({"role": "user", "content": user_text})
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    response = await get_ai_response(update.effective_user.id, update.message.text)
+    await update.message.reply_text(response)
 
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Transcribing your voice... hold on.")
+    
+    # 1. Download the voice file from Telegram
+    voice_file = await context.bot.get_file(update.message.voice.file_id)
+    file_path = "user_voice.ogg"
+    await voice_file.download_to_drive(file_path)
+    
     try:
-        # 2. Send FULL history to Groq
-        chat_completion = client.chat.completions.create(
-            messages=user_conversations[user_id],
-            model="llama-3.3-70b-versatile", 
-        )
-        response = chat_completion.choices[0].message.content
+        # 2. Transcribe using Groq Whisper
+        with open(file_path, "rb") as file:
+            transcription = client.audio.transcriptions.create(
+                file=(file_path, file.read()),
+                model="whisper-large-v3",
+            )
         
-        # 3. Add AI response to memory
-        user_conversations[user_id].append({"role": "assistant", "content": response})
-
-        # 4. Trim history to stay within limits
-        if len(user_conversations[user_id]) > MAX_HISTORY:
-            # Keep system prompt + the most recent messages
-            user_conversations[user_id] = [user_conversations[user_id][0]] + user_conversations[user_id][-(MAX_HISTORY-1):]
-
-        await update.message.reply_text(response)
+        user_text = transcription.text
+        logger.info(f"Transcribed: {user_text}")
+        
+        # 3. Feed transcribed text to the Mentor Brain
+        response = await get_ai_response(update.effective_user.id, user_text)
+        await update.message.reply_text(f"🎤 You said: \"{user_text}\"\n\n🚀 Strategy: {response}")
         
     except Exception as e:
-        logger.error(f"Error: {e}")
-        await update.message.reply_text("My brain hit a snag. Try again in a minute.")
+        logger.error(f"Voice Error: {e}")
+        await update.message.reply_text("I couldn't hear that clearly. Try again or type it.")
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path) # Clean up the file
 
-# --- 4. EXECUTION ---
+# --- 5. EXECUTION ---
 def main():
-    # Start Flask in background thread first
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info("✅ Heartbeat server active.")
-
+    threading.Thread(target=run_flask, daemon=True).start()
+    
     TOKEN = os.environ.get("TELEGRAM_TOKEN")
-    if not TOKEN:
-        logger.error("❌ TELEGRAM_TOKEN missing!")
-        return
-
     application = Application.builder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    application.add_handler(filters.VOICE, handle_voice) # Error check: This was missing!
 
-    logger.info("🚀 Bot is polling with memory...")
+    # Re-adding the missing VOICE handler correctly
+    application.add_handler(MessageHandler(filters.VOICE, handle_voice))
+
+    logger.info("🚀 Pilot is Live: Text + Voice.")
     application.run_polling()
 
 if __name__ == "__main__":
