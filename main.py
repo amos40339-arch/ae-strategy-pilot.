@@ -1,117 +1,85 @@
 import os
-import requests
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-
-# Credentials from Environment Variables (Render)
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-
-# 1. The Welcome Message (Centralized)
-async def send_welcome(update: Update):
-    welcome = (
-        "🚀 **AE Strategy Pilot Active**\n\n"
-        "I am your strategic partner. I don't do 'nice'—I do 'results.'\n\n"
-        "• Send a **Voice Note**: I'll transcribe and give you a ruthless strategy.\n"
-        "• Send a **Text Message**: We'll brainstorm your next move.\n\n"
-        "How can we win today?"
-    )
-    await update.message.reply_text(welcome, parse_mode="Markdown")
-
-# 2. Handler for /start command
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_welcome(update)
-
-# 3. Handler for Text (Greetings or Strategy)
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text.lower().strip()
-    
-    # List of greeting words to trigger the welcome message
-    greetings = ["hello", "hi", "hey", "yo", "morning", "afternoon", "evening", "start"]
-    
-    if user_text in greetings:
-        await send_welcome(update)
-    else:
-        # If it's not a greeting, send it to the AI brain
-        chat_resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-            json={
-                "model": "llama-3.3-70b-versatile",
-                "messages": [
-                    {"role": "system", "content": "You are the AE Strategic Partner. Be blunt, professional, and practical. Analyze the user's input and provide a ruthless path to execution."},
-                    {"role": "user", "content": user_text}
-                ]
-            }
-        )
-        strategy = chat_resp.json()['choices'][0]['message']['content']
-        await update.message.reply_text(strategy)
-
-# 4. Handler for Audio (Transcription + Strategy)
-async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status = await update.message.reply_text("📥 AE Pilot is listening...")
-    
-    # Download Audio
-    audio_file = update.message.voice or update.message.audio
-    file = await context.bot.get_file(audio_file.file_id)
-    file_bytes = await file.download_as_bytearray()
-
-    # Transcribe with Groq Whisper
-    files = {'file': ('audio.ogg', file_bytes)}
-    trans_resp = requests.post(
-        "https://api.groq.com/openai/v1/audio/transcriptions",
-        headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-        files=files,
-        data={"model": "whisper-large-v3"}
-    )
-    transcript = trans_resp.json().get("text", "Error transcribing audio.")
-
-    # Strategy with Groq Llama-3
-    await status.edit_text("🧠 Analyzing strategy...")
-    chat_resp = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-        json={
-            "model": "llama-3.3-70b-versatile",
-            "messages": [
-                {"role": "system", "content": "You are the AE Strategic Partner. Provide a SUMMARY, RUTHLESS ANALYSIS, and 3 NEXT STEPS based on the transcript."},
-                {"role": "user", "content": f"Analyze this transcript: {transcript}"}
-            ]
-        }
-    )
-    strategy = chat_resp.json()['choices'][0]['message']['content']
-    await status.edit_text(f"📝 **TRANSCRIPT:**\n{transcript}\n\n---\n\n{strategy}", parse_mode="Markdown")
-
-if __name__ == '__main__':
-    app = ApplicationBuilder().token(TOKEN).build()
-    
-    # Listen for /start
-    app.add_handler(CommandHandler("start", start))
-    # Listen for all other text
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    # Listen for audio/voice
-    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_audio))
-    
-    print("AE Strategy Pilot is deployed and running...")
-    app.run_polling()
-import os
+import threading
+import logging
 from flask import Flask
-from threading import Thread
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from groq import Groq
 
-app = Flask('')
+# --- 1. LOGGING SETUP ---
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# --- 2. FLASK SERVER (The Heartbeat) ---
+app = Flask(__name__)
 
 @app.route('/')
-def home():
-    return "Bot is alive!"
+def health_check():
+    # This keeps Render and UptimeRobot happy
+    return "AE Strategy Pilot: Online and Ruthless", 200
 
-def run():
-    # Render provides a 'PORT' environment variable automatically
+def run_flask():
+    # Render provides the PORT variable automatically
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
+# --- 3. BOT LOGIC (The Brain) ---
+# Initialize Groq Client
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+client = Groq(api_key=GROQ_API_KEY)
 
-# Call this before your bot starts polling
-keep_alive()
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_name = update.effective_user.first_name
+    await update.message.reply_text(
+        f"Welcome, {user_name}. I am the AE Strategy Pilot.\n\n"
+        "I don't do 'motivation.' I do execution. Send me your business problem, "
+        "and I'll tell you why you're failing and how to fix it."
+    )
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text
+    
+    try:
+        # Groq AI Logic
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": "You are a ruthless business mentor. Be blunt, honest, and practical. No fluff."},
+                {"role": "user", "content": user_text}
+            ],
+            model="llama3-8b-8192", # Or your preferred model
+        )
+        response = chat_completion.choices[0].message.content
+        await update.message.reply_text(response)
+        
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        await update.message.reply_text("My brain hit a snag. Probably a rate limit. Try again in a minute.")
+
+# --- 4. EXECUTION ---
+def main():
+    # A. Start Flask in background FIRST (daemon=True so it stops when the bot stops)
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info("✅ Flask heartbeat server started.")
+
+    # B. Setup Telegram Bot
+    TOKEN = os.environ.get("TELEGRAM_TOKEN")
+    if not TOKEN:
+        logger.error("❌ No TELEGRAM_TOKEN found in Environment Variables!")
+        return
+
+    application = Application.builder().token(TOKEN).build()
+
+    # C. Handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # D. Start the Bot
+    logger.info("🚀 AE Strategy Pilot is now polling...")
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
