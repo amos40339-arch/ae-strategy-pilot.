@@ -23,7 +23,7 @@ def health_check():
 
 def run_flask():
     # Render provides the PORT variable automatically
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
 # --- 3. BOT LOGIC (The Brain) ---
@@ -43,24 +43,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     
     try:
-        # Groq AI Logic
+        # UPDATED MODEL: llama-3.3-70b-versatile is currently active
         chat_completion = client.chat.completions.create(
             messages=[
                 {"role": "system", "content": "You are a ruthless business mentor. Be blunt, honest, and practical. No fluff."},
                 {"role": "user", "content": user_text}
             ],
-            model="llama3-8b-8192", # Or your preferred model
+            model="llama-3.3-70b-versatile", 
         )
         response = chat_completion.choices[0].message.content
         await update.message.reply_text(response)
         
     except Exception as e:
         logger.error(f"Error: {e}")
-        await update.message.reply_text("My brain hit a snag. Probably a rate limit. Try again in a minute.")
+        # If the model name changes again, the logs will show us
+        await update.message.reply_text("My brain hit a snag. Probably a rate limit or a model update. Try again in a minute.")
 
 # --- 4. EXECUTION ---
 def main():
-    # A. Start Flask in background FIRST (daemon=True so it stops when the bot stops)
+    # A. Start Flask in background FIRST
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask heartbeat server started.")
