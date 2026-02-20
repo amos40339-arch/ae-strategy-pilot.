@@ -4,10 +4,11 @@ import logging
 import time
 from flask import Flask
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from groq import Groq
 
-# --- 1. INITIAL SETUP ---
+# --- 1. SETUP & LOGGING ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
     level=logging.INFO
@@ -21,10 +22,10 @@ MAX_HISTORY = 10
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 client = Groq(api_key=GROQ_API_KEY)
 
-# --- 2. FLASK HEARTBEAT (For Render) ---
+# --- 2. FLASK HEARTBEAT ---
 @app.route('/')
 def health_check():
-    return "AE Strategy Pilot: Online & Client-Ready", 200
+    return "AE Strategy Pilot: Online & Heavy-Duty Mode", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -33,9 +34,8 @@ def run_flask():
 # --- 3. THE BRAIN (AI Logic) ---
 async def get_ai_response(user_id, text):
     if user_id not in user_conversations:
-        # The System Prompt defines the "Ruthless" persona
         user_conversations[user_id] = [
-            {"role": "system", "content": "You are a ruthless business mentor. Be blunt, honest, and practical. No fluff. Focus on execution."}
+            {"role": "system", "content": "You are a ruthless business mentor and crypto AMA auditor. Be blunt, strategic, and practical. Focus on ROI and execution logic."}
         ]
     
     user_conversations[user_id].append({"role": "user", "content": text})
@@ -48,33 +48,38 @@ async def get_ai_response(user_id, text):
     response = chat_completion.choices[0].message.content
     user_conversations[user_id].append({"role": "assistant", "content": response})
     
-    # Trim history to keep context sharp
     if len(user_conversations[user_id]) > MAX_HISTORY:
         user_conversations[user_id] = [user_conversations[user_id][0]] + user_conversations[user_id][-(MAX_HISTORY-1):]
     
+    # We return the response and will wrap it in HTML tags in the handler
     return response
 
 # --- 4. HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Strategy Pilot Active. Send a text or voice note of your business problem.")
+    await update.message.reply_text("<b>Pilot Active.</b> Ready for text or heavy voice audits.", parse_mode=ParseMode.HTML)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = await get_ai_response(update.effective_user.id, update.message.text)
-    await update.message.reply_text(response)
+    # BOLDING: We wrap the whole response in <b> tags
+    await update.message.reply_text(f"<b>{response}</b>", parse_mode=ParseMode.HTML)
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    status_msg = await update.message.reply_text("🎤 Hearing you...")
+    status_msg = await update.message.reply_text("📥 <b>Receiving long-form audio...</b>", parse_mode=ParseMode.HTML)
     
-    # Unique filename using user ID and timestamp to prevent crashes
     file_path = f"voice_{user_id}_{int(time.time())}.ogg"
     
     try:
-        # Get file with 30-second timeout for slow connections
-        voice_file = await context.bot.get_file(update.message.voice.file_id, read_timeout=30)
+        # HEAVY-DUTY TIMEOUTS for long audio
+        voice_file = await context.bot.get_file(
+            update.message.voice.file_id, 
+            read_timeout=120, 
+            write_timeout=120
+        )
         await voice_file.download_to_drive(file_path)
         
-        # Transcribe with Whisper-3
+        await status_msg.edit_text("⚙️ <b>Transcribing segment...</b>", parse_mode=ParseMode.HTML)
+
         with open(file_path, "rb") as file:
             transcription = client.audio.transcriptions.create(
                 file=(file_path, file.read()),
@@ -82,35 +87,33 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         
         user_text = transcription.text
+        await status_msg.edit_text(f"📝 <b>Segment Captured.</b> Analyzing strategy...", parse_mode=ParseMode.HTML)
         
-        # SHOW TRANSCRIPT IMMEDIATELY (Client trust builder)
-        await status_msg.edit_text(f"📝 *You said:* \"{user_text}\"\n\n_Analyzing strategy..._")
-        
-        # Analyze and send final strategy
+        # ANALYSIS
         response = await get_ai_response(user_id, user_text)
-        await update.message.reply_text(f"🚀 *Strategy:* \n\n{response}", parse_mode="Markdown")
+        # BOLDING the output here too
+        await update.message.reply_text(f"🚀 <b>STRATEGY AUDIT:</b>\n\n<b>{response}</b>", parse_mode=ParseMode.HTML)
         
     except Exception as e:
-        logger.error(f"DETAILED VOICE ERROR: {str(e)}")
-        await status_msg.edit_text("❌ Error processing audio. Please try a shorter clip or text.")
+        logger.error(f"HEAVY VOICE ERROR: {str(e)}")
+        await status_msg.edit_text("❌ <b>Error:</b> File too large or connection timed out.")
     finally:
-        # Always clean up the file
         if os.path.exists(file_path):
             os.remove(file_path)
 
 # --- 5. EXECUTION ---
 def main():
-    # Start Heartbeat
     threading.Thread(target=run_flask, daemon=True).start()
     
     TOKEN = os.environ.get("TELEGRAM_TOKEN")
-    application = Application.builder().token(TOKEN).build()
+    # Setting global defaults for the application
+    application = Application.builder().token(TOKEN).read_timeout(60).write_timeout(60).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
-    logger.info("🚀 System Live: Client-Ready Mode.")
+    logger.info("🚀 System Live: HTML Bolding & Audio Extension Active.")
     application.run_polling()
 
 if __name__ == "__main__":
