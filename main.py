@@ -28,7 +28,7 @@ def run_flask():
 # --- 3. BRAIN ---
 async def get_ai_response(user_id, text):
     if user_id not in user_conversations:
-        user_conversations[user_id] = [{"role": "system", "content": "You are a ruthless business mentor. Be blunt and practical. Use plain text only."}]
+        user_conversations[user_id] = [{"role": "system", "content": "You are a ruthless business mentor. Be blunt and practical. Use plain text only. No bolding. No stars."}]
     
     user_conversations[user_id].append({"role": "user", "content": text})
     
@@ -43,15 +43,16 @@ async def get_ai_response(user_id, text):
 
 # --- 4. HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Pilot Active. Send text or short voice notes (5s).")
+    await update.message.reply_text("Pilot Active. Send text for a strategy audit or keep voice notes under 5 seconds.")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = await get_ai_response(update.effective_user.id, update.message.text)
+    # Plain text delivery - no bolding
     await update.message.reply_text(response)
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    status_msg = await update.message.reply_text("Processing voice command...")
+    status_msg = await update.message.reply_text("Processing command...")
     file_path = f"v_{user_id}_{int(time.time())}.ogg"
     
     try:
@@ -65,14 +66,15 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         
         user_text = transcription.text
-        await status_msg.edit_text(f"Analyzed: {user_text}")
+        # Show what was heard in plain text
+        await status_msg.edit_text(f"Heard: {user_text}")
         
         response = await get_ai_response(user_id, user_text)
         await update.message.reply_text(response)
         
     except Exception as e:
         logger.error(f"Error: {e}")
-        await status_msg.edit_text("Clip too long for Free Tier. Keep it under 6 seconds.")
+        await status_msg.edit_text("Error: Keep voice clips short or use text for deep audits.")
     finally:
         if os.path.exists(file_path):
             os.remove(file_path)
