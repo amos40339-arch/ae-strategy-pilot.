@@ -1,130 +1,89 @@
 import os
-import logging
+import threading
 import requests
+import logging
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from groq import Groq
 
-# --- CONFIGURATION (PUT YOUR KEYS HERE) ---
-TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-GROQ_API_KEY = "YOUR_GROQ_API_KEY"
+# --- 1. FLASK WEB SERVER (THE "ALIVE" SIGNAL) ---
+server = Flask(__name__)
 
-# Free Crypto News API (No Key Needed)
+@server.route('/')
+def health_check():
+    return "AE Intelligence is Online", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    server.run(host='0.0.0.0', port=port)
+
+# --- 2. CONFIGURATION & AI CLIENT ---
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 NEWS_URL = "https://free-crypto-news.vercel.app/api/news?limit=3"
 
-# Initialize Groq Client
 client = Groq(api_key=GROQ_API_KEY)
-
-# Logging Setup
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(level=logging.INFO)
 
 SYSTEM_PROMPT = (
     "You are the Lead Crypto Market Analyst for AE Intelligence. "
-    "Role: Provide blunt, data-driven audits. "
-    "Constraint: If information is not in the text/audio, say 'DATA NOT FOUND.' "
-    "Tone: Professional, cynical, alert to scams (Rug pulls, Dev dumping). "
-    "Analyze for: 1. Investor Concerns, 2. Technical Gaps, 3. Sentiment Score (0-100%)."
+    "Role: Provide blunt, cynical, data-driven audits. "
+    "Focus: 1. Investor Concerns, 2. Technical Gaps, 3. Sentiment Score (0-100%)."
 )
 
-# --- AI LOGIC ---
+# --- 3. BOT LOGIC ---
 
 async def ai_audit(text: str):
-    """Llama 3 Audit via Groq (Free Tier Optimized)"""
     try:
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"AUDIT THIS: {text}"}
-            ],
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": text}],
             temperature=0.1
         )
         return completion.choices[0].message.content
-    except Exception as e:
-        return "⚠️ Rate limit reached. Wait 60 seconds."
+    except:
+        return "⚠️ Rate limit reached. Try again in 60s."
 
 async def transcribe_audio(file_path: str):
-    """Whisper Transcription via Groq"""
     try:
         with open(file_path, "rb") as file:
-            transcription = client.audio.transcriptions.create(
-                file=(file_path, file.read()),
-                model="whisper-large-v3-turbo",
-                response_format="text",
-            )
-        return transcription
+            return client.audio.transcriptions.create(file=(file_path, file.read()), model="whisper-large-v3-turbo", response_format="text")
     except Exception as e:
-        return f"❌ Transcription Failed: {str(e)}"
+        return f"❌ Audio Error: {str(e)}"
 
-# --- TELEGRAM COMMANDS ---
+# --- 4. HANDLERS ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """The Professional Menu"""
-    keyboard = [
-        [InlineKeyboardButton("📰 Latest Market News", callback_query_data='news')],
-        [InlineKeyboardButton("🛡️ How to Audit", callback_query_data='help')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "⚡ **AE INTELLIGENCE v2.0 (GROQ ENGINE)** ⚡\n\n"
-        "Forward an **AMA Voice Note**, **Text File**, or **Chat Log** here.\n"
-        "I will audit it for scams and sentiment immediately.",
-        reply_markup=reply_markup, parse_mode='Markdown'
-    )
-
-async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Market Pulse with AI Impact Analysis"""
-    try:
-        res = requests.get(NEWS_URL).json()
-        report = "📰 **MARKET PULSE (AI IMPACT ANALYSIS)**\n\n"
-        
-        for art in res:
-            title = art['title']
-            # AI interprets the news impact
-            impact = client.chat.completions.create(
-                model="llama3-8b-8192", # Using smaller model for speed
-                messages=[{"role": "user", "content": f"Explain crypto impact of this in 2 sentences: {title}"}],
-                temperature=0.1
-            ).choices[0].message.content
-            report += f"🔹 **{title}**\n💡 {impact}\n\n"
-        
-        await update.message.reply_text(report, parse_mode='Markdown')
-    except:
-        await update.message.reply_text("❌ News feed currently down.")
+    await update.message.reply_text("⚡ **AE INTELLIGENCE v2.0** ⚡\nSend an AMA Audio or Text for Audit.")
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles Text Files, Audio, and Voice Notes"""
-    # 1. Check if it's Audio or Voice
+    msg = await update.message.reply_text("📡 Processing...")
     media = update.message.voice or update.message.audio or update.message.document
-    if not media: return
-
-    status_msg = await update.message.reply_text("📡 **AE Intelligence Processing...**")
     
     file = await media.get_file()
     file_path = f"temp_{media.file_id}"
     await file.download_to_drive(file_path)
 
-    # 2. Transcribe if Audio
     if update.message.voice or update.message.audio:
         content = await transcribe_audio(file_path)
-    else: # If it's a .txt file
+    else:
         with open(file_path, 'r') as f: content = f.read()
 
-    # 3. Audit the Content
-    await status_msg.edit_text("🔍 **Analyzing for Red Flags...**")
     analysis = await ai_audit(content)
-    
-    await update.message.reply_text(f"📝 **STRATEGIC AUDIT REPORT:**\n\n{analysis}")
+    await update.message.reply_text(f"📝 **AUDIT REPORT:**\n\n{analysis}")
     os.remove(file_path)
 
-# --- INITIALIZATION ---
+# --- 5. DEPLOYMENT START ---
 if __name__ == '__main__':
+    # Start Flask in background to keep server awake
+    threading.Thread(target=run_flask, daemon=True).start()
+
+    # Run Telegram Bot
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("news", news_command))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), lambda u, c: handle_media(u, c)))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), lambda u, c: ai_audit(u.message.text)))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.Document.TEXT, handle_media))
     
-    print("AE Intelligence is ONLINE.")
+    print("AE Intelligence Engine LIVE.")
     app.run_polling()
