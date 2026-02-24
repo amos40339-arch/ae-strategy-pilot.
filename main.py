@@ -1,89 +1,84 @@
-import os
-import threading
-import requests
-import logging
+import os, re, threading, logging, requests, fitz
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from groq import Groq
+from supabase import create_client
 
-# --- 1. FLASK WEB SERVER (THE "ALIVE" SIGNAL) ---
-server = Flask(__name__)
-
-@server.route('/')
-def health_check():
-    return "AE Intelligence is Online", 200
-
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    server.run(host='0.0.0.0', port=port)
-
-# --- 2. CONFIGURATION & AI CLIENT ---
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-NEWS_URL = "https://free-crypto-news.vercel.app/api/news?limit=3"
-
-client = Groq(api_key=GROQ_API_KEY)
+# --- 1. CONFIG & SYSTEM ---
 logging.basicConfig(level=logging.INFO)
+server = Flask(__name__) # This MUST be named 'server' for Gunicorn
 
-SYSTEM_PROMPT = (
-    "You are the Lead Crypto Market Analyst for AE Intelligence. "
-    "Role: Provide blunt, cynical, data-driven audits. "
-    "Focus: 1. Investor Concerns, 2. Technical Gaps, 3. Sentiment Score (0-100%)."
-)
+# Keys from Environment Variables
+TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GROQ_KEY = os.getenv("GROQ_API_KEY")
+SUPA_URL = os.getenv("SUPABASE_URL")
+SUPA_KEY = os.getenv("SUPABASE_KEY")
 
-# --- 3. BOT LOGIC ---
+groq_client = Groq(api_key=GROQ_KEY)
+db = create_client(SUPA_URL, SUPA_KEY)
 
-async def ai_audit(text: str):
+# --- 2. TOOLS (Blacklist & Dex) ---
+async def security_scan(text):
+    ca_match = re.search(r'0x[a-fA-F0-9]{40}', text)
+    if not ca_match: return None
+    ca = ca_match.group(0)
+    
+    # Check Supabase Blacklist
+    check = db.table("blacklist").select("*").eq("target_value", ca).execute()
+    if check.data:
+        return f"🚨 BLACKLISTED: {check.data[0]['reason']}"
+
+    # Check DexScreener
     try:
-        completion = client.chat.completions.create(
+        res = requests.get(f"https://api.dexscreener.com/latest/dex/tokens/{ca}").json()
+        pair = res.get('pairs', [{}])[0]
+        liq = pair.get('liquidity', {}).get('usd', 0)
+        return f"📊 DATA: Liq: ${liq:,.0f} | Price: ${pair.get('priceUsd', '0')}"
+    except: return None
+
+# --- 3. BOT HANDLERS ---
+async def handle_ae(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    content = msg.text or ""
+
+    # PDF Processing
+    if msg.document and msg.document.mime_type == "application/pdf":
+        status = await msg.reply_text("📑 Analyzing Whitepaper...")
+        pdf = await msg.document.get_file()
+        path = f"temp_{msg.chat_id}.pdf"
+        await pdf.download_to_drive(path)
+        doc = fitz.open(path)
+        content = "".join([p.get_text() for p in doc])[:8000]
+        os.remove(path)
+        await status.delete()
+
+    sec_info = await security_scan(content)
+    if sec_info: await msg.reply_text(sec_info)
+
+    # Strategy AI
+    try:
+        ai_res = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": text}],
-            temperature=0.1
+            messages=[
+                {"role": "system", "content": "You are AE Strategy Pilot. ROI-focused, blunt, tactical."},
+                {"role": "user", "content": content}
+            ]
         )
-        return completion.choices[0].message.content
-    except:
-        return "⚠️ Rate limit reached. Try again in 60s."
-
-async def transcribe_audio(file_path: str):
-    try:
-        with open(file_path, "rb") as file:
-            return client.audio.transcriptions.create(file=(file_path, file.read()), model="whisper-large-v3-turbo", response_format="text")
+        await msg.reply_text(ai_res.choices[0].message.content)
     except Exception as e:
-        return f"❌ Audio Error: {str(e)}"
+        await msg.reply_text("⚠️ Logic error. Check logs.")
 
-# --- 4. HANDLERS ---
+# --- 4. EXECUTION ---
+@server.route('/')
+def live(): return "AE Pilot Live", 200
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚡ **AE INTELLIGENCE v2.0** ⚡\nSend an AMA Audio or Text for Audit.")
+def start_web():
+    server.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
 
-async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("📡 Processing...")
-    media = update.message.voice or update.message.audio or update.message.document
-    
-    file = await media.get_file()
-    file_path = f"temp_{media.file_id}"
-    await file.download_to_drive(file_path)
-
-    if update.message.voice or update.message.audio:
-        content = await transcribe_audio(file_path)
-    else:
-        with open(file_path, 'r') as f: content = f.read()
-
-    analysis = await ai_audit(content)
-    await update.message.reply_text(f"📝 **AUDIT REPORT:**\n\n{analysis}")
-    os.remove(file_path)
-
-# --- 5. DEPLOYMENT START ---
 if __name__ == '__main__':
-    # Start Flask in background to keep server awake
-    threading.Thread(target=run_flask, daemon=True).start()
-
-    # Run Telegram Bot
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), lambda u, c: ai_audit(u.message.text)))
-    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.Document.TEXT, handle_media))
-    
-    print("AE Intelligence Engine LIVE.")
-    app.run_polling()
+    threading.Thread(target=start_web, daemon=True).start()
+    bot = ApplicationBuilder().token(TG_TOKEN).build()
+    bot.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("⚡ AE Pilot v2.0 READY.")))
+    bot.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), handle_ae))
+    bot.run_polling()
